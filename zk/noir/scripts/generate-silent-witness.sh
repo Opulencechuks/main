@@ -73,6 +73,8 @@ credential_root = "$CREDENTIAL_ROOT"
 nullifier = "$NULLIFIER"
 EOF
 
+python3 "$ROOT_DIR/../tools/validate_prover_inputs.py" "$CIRCUIT_TOML" --required-fields credential_secret nullifier_secret video_hash_hi video_hash_lo credential_root nullifier
+
 pushd "$CIRCUIT_DIR" >/dev/null
 nargo check >/dev/null
 nargo execute witness >/dev/null

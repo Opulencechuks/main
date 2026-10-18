@@ -175,6 +175,8 @@ nullifier_${i} = "$NULLIFIER"
 EOF
 done
 
+python3 "$ROOT_DIR/../tools/validate_prover_inputs.py" "$CIRCUIT_TOML" --required-fields credential_secret nullifier_secret
+
 echo "==> Proving with aggregator circuit..."
 pushd "$CIRCUIT_DIR" >/dev/null
 nargo check >/dev/null
