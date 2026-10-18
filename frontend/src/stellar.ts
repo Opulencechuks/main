@@ -2,6 +2,7 @@ import { getNetwork, requestAccess, WatchWalletChanges } from '@stellar/freighte
 
 export type {
   ChainProofRecord,
+  DelegationRecord,
   IdentityTier,
   ProofHistoryEntry,
   ProofHistoryResult,
@@ -9,7 +10,12 @@ export type {
   RegisterProofResult,
   TxState,
 } from './stellarTypes'
-export { describeTxState } from './stellarTypes'
+export {
+  describeTxState,
+  DELEGATION_SCOPE_REGISTER_SOURCE,
+  DELEGATION_SCOPE_REGISTER_SEAL,
+  DELEGATION_SCOPE_ALL,
+} from './stellarTypes'
 export {
   correctProof,
   expireProof,
@@ -18,8 +24,11 @@ export {
   getProofHistoryAt,
   getProofHistoryCount,
   registerProofOnStellar,
+  buildRegisterProofOperation,
   verifyProof,
   getVerifierState,
+  isDelegationActive,
+  getDelegation,
   CONTRACT_NETWORK_PASSPHRASE,
 } from './harpocratesRegistry'
 // Re-export for use by wallet hook and guard code.
