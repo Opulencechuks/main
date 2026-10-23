@@ -31,10 +31,6 @@ import type {
   RegistryMethod,
   TxState,
 } from './stellarTypes'
-import {
-  DELEGATION_SCOPE_REGISTER_SOURCE,
-  DELEGATION_SCOPE_REGISTER_SEAL,
-} from './stellarTypes'
 
 const RPC_URL = import.meta.env.VITE_STELLAR_RPC_URL ?? 'https://soroban-testnet.stellar.org'
 

@@ -164,6 +164,7 @@ export type RegistryMethod =
   | 'add_schema'
   | 'get_schema'
   | 'get_verifier_state'
+  | 'get_open_dispute_count'
 
 export const DELEGATION_SCOPE_REGISTER_SOURCE = 1 << 0
 export const DELEGATION_SCOPE_REGISTER_SEAL = 1 << 1
