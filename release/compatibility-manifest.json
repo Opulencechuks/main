@@ -68,7 +68,7 @@
     {
       "component": "backend",
       "path": "backend/app.py",
-      "sha256": "e7d69d52f90af3156a4b0b5bb184754165d45e4641b031267e6816f2b25ba4d4"
+      "sha256": "29246a1474c6d49303c3a5424e21754a1b9b486bc95ed0e199e7e12eb4cdc841"
     },
     {
       "component": "backend",
