@@ -125,7 +125,7 @@
         "MAX_JSON_BYTES": "256",
         "MAX_METADATA_BYTES": "128",
         "HARPOCRATES_RELEASE_ID": "harpocrates-1.0.0",
-        "HARPOCRATES_RELEASE_NETWORK": "futurenet"
+        "HARPOCRATES_RELEASE_NETWORK": "local"
       },
       "checks": [
         "health_ok",
