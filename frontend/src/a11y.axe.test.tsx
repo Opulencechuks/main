@@ -215,7 +215,7 @@ describe('a11y.axe — WCAG 2.2 AA automated checks', () => {
     const { container } = render(<App />)
     await user.click(screen.getByRole('button', { name: /^verify$/i }))
 
-    expect(screen.getByLabelText(/drop or choose a received video/i)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /drop or choose a received video/i })).toBeInTheDocument()
     expectNoA11yViolations(await runAxe(container), 'verify view')
   })
 

@@ -184,6 +184,7 @@ export function StudioView({ wallet, evidence, verification, provenanceRecord }:
           tabIndex={0}
           aria-label={file ? `Evidence file: ${file.name}. Press Enter or Space to choose a different file` : 'Drop or choose a video file. Press Enter or Space to open file picker'}
           aria-disabled={isBusy}
+          htmlFor="studio-evidence-input"
           onKeyDown={(e) => {
             if (e.key === 'Enter' || e.key === ' ') {
               e.preventDefault()
@@ -193,15 +194,16 @@ export function StudioView({ wallet, evidence, verification, provenanceRecord }:
         >
           <Upload size={20} aria-hidden="true" />
           <span aria-hidden="true">{file ? file.name : 'Drop or choose a video file'}</span>
-          <input
-            ref={studioInputRef}
-            type="file"
-            accept="video/*"
-            tabIndex={-1}
-            aria-hidden="true"
-            onChange={(event) => void handleEvidence(event.target.files?.[0] ?? null)}
-          />
         </label>
+        <input
+          ref={studioInputRef}
+          id="studio-evidence-input"
+          type="file"
+          accept="video/*"
+          tabIndex={-1}
+          aria-hidden="true"
+          onChange={(event) => void handleEvidence(event.target.files?.[0] ?? null)}
+        />
 
         {stage === 'hashing' && hashProgress ? (
           <div className="hash-progress">
