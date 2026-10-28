@@ -166,6 +166,19 @@ export type RegistryMethod =
   | 'get_verifier_state'
   | 'get_open_dispute_count'
 
+export const DELEGATION_SCOPE_REGISTER_SOURCE = 1 << 0
+export const DELEGATION_SCOPE_REGISTER_SEAL = 1 << 1
+export const DELEGATION_SCOPE_ALL =
+  DELEGATION_SCOPE_REGISTER_SOURCE | DELEGATION_SCOPE_REGISTER_SEAL
+
+export type DelegationRecord = {
+  grantor: string
+  delegate: string
+  scope: number
+  grantedAt: number
+  expiresAt: number
+}
+
 export type ScopedProofScope = {
   /** Field element derived from the scope string (SHA-256 mod BN254). */
   scopeField: string

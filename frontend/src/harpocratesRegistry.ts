@@ -18,6 +18,7 @@ import {
 } from './stellarEncoding'
 import type {
   ChainDisputeRecord,
+  DelegationRecord,
   ChainProofRecord,
   Hex32,
   IdentityTier,
@@ -40,7 +41,7 @@ const RPC_URL = import.meta.env.VITE_STELLAR_RPC_URL ?? 'https://soroban-testnet
  */
 export const CONTRACT_NETWORK_PASSPHRASE: string = Networks.TESTNET
 
-const NETWORK_PASSTHRASE = CONTRACT_NETWORK_PASSPHRASE
+const NETWORK_PASSPHRASE = CONTRACT_NETWORK_PASSPHRASE
 const READONLY_SOURCE = import.meta.env.VITE_STELLAR_READONLY_SOURCE ?? ''
 const POLL_INTERVAL_MS = 1000
 const POLL_TIMEOUT_MS = 30000
@@ -171,7 +172,7 @@ export async function registerProofOnStellar(
 
   const transaction = new TransactionBuilder(account, {
     fee: BASE_FEE,
-    networkPassphrase: NETWORK_PASSTHRASE,
+    networkPassphrase: NETWORK_PASSPHRASE,
   })
     .addOperation(operation)
     .setTimeout(90)
@@ -179,7 +180,7 @@ export async function registerProofOnStellar(
 
   const prepared = await server.prepareTransaction(transaction)
   const signed = await signTransaction(prepared.toXDR(), {
-    networkPassphrase: NETWORK_PASSTHRASE,
+    networkPassphrase: NETWORK_PASSPHRASE,
     address: normalized.publicKey,
   })
 
@@ -298,7 +299,7 @@ export async function getBatchProofStatuses(
   
   const transaction = new TransactionBuilder(account, {
     fee: BASE_FEE,
-    networkPassphrase: NETWORK_PASSTHRASE,
+    networkPassphrase: NETWORK_PASSPHRASE,
   })
     .addOperation(contract.call('get_proof_statuses', ...scProofIds))
     .setTimeout(30)
@@ -1050,5 +1051,106 @@ export async function getVerifierState(
     overlapWindow: String(native.overlap_window),
     rollbackWindow: String(native.rollback_window),
     rollbackWindowEnd: String(native.rollback_window_end),
+  }
+}
+
+/**
+ * Check whether a delegation from `grantor` to `delegate` is currently active
+ * for the requested `scope` bitmask.
+ *
+ * Calls `is_delegation_active(grantor, delegate, scope)` on the contract.
+ * Returns `false` rather than throwing on missing/expired/wrong-scope delegations.
+ */
+export async function isDelegationActive(
+  contractId: string,
+  grantor: string,
+  delegate: string,
+  scope: number,
+  sourceAddress?: string,
+): Promise<boolean> {
+  const source = sourceAddress || delegate || READONLY_SOURCE
+  if (!source) {
+    throw new Error('Set VITE_STELLAR_READONLY_SOURCE or connect a wallet for on-chain verification.')
+  }
+
+  const server = new rpc.Server(RPC_URL)
+  const account = await server.getAccount(source)
+  const contract = new Contract(contractId)
+  const transaction = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK_PASSPHRASE,
+  })
+    .addOperation(
+      contract.call(
+        'is_delegation_active' satisfies RegistryMethod,
+        new Address(grantor).toScVal(),
+        new Address(delegate).toScVal(),
+        scU32(scope),
+      ),
+    )
+    .setTimeout(30)
+    .build()
+
+  const simulation = await server.simulateTransaction(transaction)
+  if (rpc.Api.isSimulationError(simulation)) {
+    throw new Error(simulation.error)
+  }
+  if (!rpc.Api.isSimulationSuccess(simulation) && !rpc.Api.isSimulationRestore(simulation)) {
+    return false
+  }
+
+  const native = simulation.result?.retval ? scValToNative(simulation.result.retval) : null
+  return Boolean(native)
+}
+
+/**
+ * Read the stored `DelegationRecord` from `grantor` to `delegate`, if any.
+ * Returns `null` if no delegation is recorded.
+ */
+export async function getDelegation(
+  contractId: string,
+  grantor: string,
+  delegate: string,
+  sourceAddress?: string,
+): Promise<DelegationRecord | null> {
+  const source = sourceAddress || delegate || READONLY_SOURCE
+  if (!source) {
+    throw new Error('Set VITE_STELLAR_READONLY_SOURCE or connect a wallet for on-chain verification.')
+  }
+
+  const server = new rpc.Server(RPC_URL)
+  const account = await server.getAccount(source)
+  const contract = new Contract(contractId)
+  const transaction = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK_PASSPHRASE,
+  })
+    .addOperation(
+      contract.call(
+        'get_delegation' satisfies RegistryMethod,
+        new Address(grantor).toScVal(),
+        new Address(delegate).toScVal(),
+      ),
+    )
+    .setTimeout(30)
+    .build()
+
+  const simulation = await server.simulateTransaction(transaction)
+  if (rpc.Api.isSimulationError(simulation)) {
+    throw new Error(simulation.error)
+  }
+  if (!rpc.Api.isSimulationSuccess(simulation) && !rpc.Api.isSimulationRestore(simulation)) {
+    return null
+  }
+
+  const native = simulation.result?.retval ? scValToNative(simulation.result.retval) : null
+  if (!native) return null
+
+  return {
+    grantor: String(native.grantor),
+    delegate: String(native.delegate),
+    scope: Number(native.scope),
+    grantedAt: Number(native.granted_at),
+    expiresAt: Number(native.expires_at),
   }
 }
