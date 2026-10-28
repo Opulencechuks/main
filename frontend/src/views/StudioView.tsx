@@ -65,6 +65,89 @@ export function StudioView({ wallet, evidence, verification, provenanceRecord }:
 
   const studioInputRef = useRef<HTMLInputElement | null>(null)
 
+  const [grantorAddress, setGrantorAddress] = useState('')
+  const [delegationStatus, setDelegationStatus] = useState<
+    'idle' | 'checking' | 'active' | 'expired' | 'wrong_scope' | 'missing' | 'invalid_address' | 'self_delegation' | 'error'
+  >('idle')
+  const [delegationExpiry, setDelegationExpiry] = useState<number | null>(null)
+  const [delegationError, setDelegationError] = useState<string | null>(null)
+
+  const trimmedGrantor = grantorAddress.trim()
+
+  useEffect(() => {
+    if (selectedTier === 'silent' || !trimmedGrantor) {
+      setDelegationStatus('idle')
+      setDelegationExpiry(null)
+      setDelegationError(null)
+      return
+    }
+
+    if (!STELLAR_STRKEY.test(trimmedGrantor)) {
+      setDelegationStatus('invalid_address')
+      setDelegationExpiry(null)
+      setDelegationError('Grantor address must be a valid 56-character Stellar address (starting with G or C).')
+      return
+    }
+
+    if (wallet && trimmedGrantor.toUpperCase() === wallet.toUpperCase()) {
+      setDelegationStatus('self_delegation')
+      setDelegationExpiry(null)
+      setDelegationError('Grantor cannot be your own wallet address. Use direct registration instead.')
+      return
+    }
+
+    let isMounted = true
+    const requiredScope =
+      selectedTier === 'seal'
+        ? DELEGATION_SCOPE_REGISTER_SEAL
+        : DELEGATION_SCOPE_REGISTER_SOURCE
+
+    setDelegationStatus('checking')
+    setDelegationError(null)
+
+    async function checkDelegation() {
+      try {
+        const [active, record] = await Promise.all([
+          isDelegationActive(CONTRACT_ID, trimmedGrantor, wallet, requiredScope),
+          getDelegation(CONTRACT_ID, trimmedGrantor, wallet),
+        ])
+
+        if (!isMounted) return
+
+        if (!record) {
+          setDelegationStatus('missing')
+          setDelegationExpiry(null)
+          return
+        }
+
+        setDelegationExpiry(record.expiresAt)
+
+        if (active) {
+          setDelegationStatus('active')
+        } else {
+          const nowSeconds = Math.floor(Date.now() / 1000)
+          if (record.expiresAt <= nowSeconds) {
+            setDelegationStatus('expired')
+          } else if ((record.scope & requiredScope) !== requiredScope) {
+            setDelegationStatus('wrong_scope')
+          } else {
+            setDelegationStatus('missing')
+          }
+        }
+      } catch (err) {
+        if (!isMounted) return
+        setDelegationStatus('error')
+        setDelegationError(err instanceof Error ? err.message : 'Error checking delegation.')
+      }
+    }
+
+    void checkDelegation()
+
+    return () => {
+      isMounted = false
+    }
+  }, [trimmedGrantor, wallet, selectedTier])
+
   const shareLinkInput = useMemo((): VerificationShareLinkInput | null => {
     if (!proof?.videoHash || !proof.proofId || !proof.metadataHash || !CONTRACT_ID) return null
     return {
