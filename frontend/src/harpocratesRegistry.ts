@@ -756,46 +756,6 @@ export async function respondDispute(
   }
 }
 
-/**
- * Return the number of currently Open disputes for a given proof.
- */
-export async function getOpenDisputeCount(
-  contractId: string,
-  proofId: string,
-  sourceAddress?: string,
-): Promise<number> {
-  const source = sourceAddress || READONLY_SOURCE
-  if (!source) {
-    return 0
-  }
-
-  const server = new rpc.Server(RPC_URL)
-  const account = await server.getAccount(source)
-  const contract = new Contract(contractId)
-  const transaction = new TransactionBuilder(account, {
-    fee: BASE_FEE,
-    networkPassphrase: NETWORK_PASSPHRASE,
-  })
-    .addOperation(
-      contract.call(
-        'get_open_dispute_count' satisfies RegistryMethod,
-        scBytes32(asHex32(proofId, 'proofId')),
-      ),
-    )
-    .setTimeout(30)
-    .build()
-
-  const simulation = await server.simulateTransaction(transaction)
-  if (rpc.Api.isSimulationError(simulation)) {
-    throw new Error(simulation.error)
-  }
-  if (!rpc.Api.isSimulationSuccess(simulation) && !rpc.Api.isSimulationRestore(simulation)) {
-    return 0
-  }
-
-  const native = simulation.result?.retval ? scValToNative(simulation.result.retval) : 0
-  return Number(native)
-}
 
 /**
  * Read a dispute record by dispute ID.
