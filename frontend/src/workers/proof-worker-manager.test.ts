@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { ProofWorkerManager } from './proof-worker-manager'
+import { DEFAULT_TEARDOWN_TIMEOUT_MS, ProofWorkerManager } from './proof-worker-manager'
 import { ProofWorkerLogger } from './proof-worker-logger'
-import type { ProofWorkerResponse } from './proof.worker.types'
+import type { ProofWorkerMessage, ProofWorkerResponse } from './proof.worker.types'
 
 /**
  * `ProofWorkerManager` does not spawn a real worker yet: `init` only flips
@@ -572,5 +572,171 @@ describe('single ownership protocol and operation generations', () => {
       expectedGeneration: owner.generation,
       receivedGeneration: owner.generation,
     })
+  })
+})
+
+describe('explicit worker teardown acknowledgement', () => {
+  it('confirms teardown when teardown_ack arrives within the bounded interval', async () => {
+    vi.useFakeTimers()
+    const manager = createManager()
+    await manager.init()
+
+    const fake = new FakeWorker()
+    internals(manager).worker = fake as unknown as Worker
+    const owner = manager.acquireOwnership('op-teardown-confirmed')
+
+    const teardownPromise = manager.cancelAndTeardown({ timeoutMs: 250 })
+    expect(fake.posted).toHaveLength(1)
+    const cancelMsg = fake.posted[0] as ProofWorkerMessage
+    expect(cancelMsg.type).toBe('cancel')
+    expect(cancelMsg.id).toMatch(/^cancel_/)
+    expect(cancelMsg.generation).toBe(owner.generation + 1)
+    expect(fake.terminated).toBe(false)
+
+    // Acknowledge before the bounded interval expires
+    await vi.advanceTimersByTimeAsync(100)
+    const dispatch = manager.handleWorkerMessage({
+      type: 'teardown_ack',
+      id: cancelMsg.id,
+      generation: cancelMsg.generation,
+      data: { message: 'Teardown acknowledged' },
+    })
+    expect(dispatch).toEqual({
+      accepted: true,
+      generation: cancelMsg.generation,
+      operationId: cancelMsg.id,
+    })
+
+    const result = await teardownPromise
+    expect(result).toEqual({
+      status: 'confirmed',
+      confirmed: true,
+      forced: false,
+      generation: cancelMsg.generation,
+      cancelId: cancelMsg.id,
+      timeoutMs: 250,
+    })
+    expect(manager.getLastTeardownResult()).toEqual(result)
+    expect(fake.terminated).toBe(false)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('forcibly terminates the worker when teardown_ack does not arrive within the bounded interval', async () => {
+    vi.useFakeTimers()
+    const manager = createManager()
+    await manager.init()
+
+    const fake = new FakeWorker()
+    internals(manager).worker = fake as unknown as Worker
+    const owner = manager.acquireOwnership('op-teardown-forced')
+
+    const teardownPromise = manager.cancelAndTeardown({ timeoutMs: 300 })
+    const cancelMsg = fake.posted[0] as ProofWorkerMessage
+
+    await vi.advanceTimersByTimeAsync(299)
+    expect(fake.terminated).toBe(false)
+
+    await vi.advanceTimersByTimeAsync(1)
+    const result = await teardownPromise
+    expect(result).toEqual({
+      status: 'forced',
+      confirmed: false,
+      forced: true,
+      generation: owner.generation + 1,
+      cancelId: cancelMsg.id,
+      timeoutMs: 300,
+    })
+    expect(manager.getLastTeardownResult()).toEqual(result)
+    expect(fake.terminated).toBe(true)
+    expect(internals(manager).worker).toBeNull()
+  })
+
+  it('uses DEFAULT_TEARDOWN_TIMEOUT_MS when no timeoutMs option is provided', async () => {
+    vi.useFakeTimers()
+    const manager = createManager()
+    await manager.init()
+
+    const fake = new FakeWorker()
+    internals(manager).worker = fake as unknown as Worker
+
+    const teardownPromise = manager.cancelAndTeardown()
+    await vi.advanceTimersByTimeAsync(DEFAULT_TEARDOWN_TIMEOUT_MS - 1)
+    expect(fake.terminated).toBe(false)
+
+    await vi.advanceTimersByTimeAsync(1)
+    const result = await teardownPromise
+    expect(result.status).toBe('forced')
+    expect(result.timeoutMs).toBe(DEFAULT_TEARDOWN_TIMEOUT_MS)
+    expect(fake.terminated).toBe(true)
+  })
+
+  it('fails closed on mismatched or unknown teardown_ack and rejects invalid inputs', async () => {
+    vi.useFakeTimers()
+    const uninitialized = createManager()
+    await expect(uninitialized.cancelAndTeardown()).rejects.toThrow('Worker manager not initialized')
+
+    const manager = createManager()
+    await manager.init()
+    await expect(manager.cancelAndTeardown({ timeoutMs: 0 })).rejects.toThrow('Invalid teardown timeoutMs')
+    await expect(manager.cancelAndTeardown({ timeoutMs: -50 })).rejects.toThrow('Invalid teardown timeoutMs')
+    await expect(manager.cancelAndTeardown({ timeoutMs: Number.NaN })).rejects.toThrow('Invalid teardown timeoutMs')
+
+    const fake = new FakeWorker()
+    internals(manager).worker = fake as unknown as Worker
+    const teardownPromise = manager.cancelAndTeardown({ timeoutMs: 100 })
+    const cancelMsg = fake.posted[0] as ProofWorkerMessage
+
+    // Unknown cancelId is rejected
+    expect(
+      manager.handleWorkerMessage({
+        type: 'teardown_ack',
+        id: 'cancel_unknown',
+        generation: cancelMsg.generation,
+      }),
+    ).toEqual({
+      accepted: false,
+      reason: 'unowned_operation',
+      expectedGeneration: cancelMsg.generation,
+      receivedGeneration: cancelMsg.generation,
+    })
+
+    // Mismatched generation is rejected and does not confirm teardown
+    expect(
+      manager.handleWorkerMessage({
+        type: 'teardown_ack',
+        id: cancelMsg.id,
+        generation: (cancelMsg.generation ?? 0) + 99,
+      }),
+    ).toEqual({
+      accepted: false,
+      reason: 'stale_generation',
+      expectedGeneration: cancelMsg.generation,
+      receivedGeneration: (cancelMsg.generation ?? 0) + 99,
+    })
+
+    await vi.advanceTimersByTimeAsync(100)
+    const result = await teardownPromise
+    expect(result.status).toBe('forced')
+    expect(result.forced).toBe(true)
+    expect(fake.terminated).toBe(true)
+  })
+
+  it('settles pending teardown as forced if destroy() is called before timeout', async () => {
+    vi.useFakeTimers()
+    const manager = createManager()
+    await manager.init()
+
+    const fake = new FakeWorker()
+    internals(manager).worker = fake as unknown as Worker
+
+    const teardownPromise = manager.cancelAndTeardown({ timeoutMs: 500 })
+    manager.destroy()
+
+    const result = await teardownPromise
+    expect(result.status).toBe('forced')
+    expect(result.confirmed).toBe(false)
+    expect(result.forced).toBe(true)
+    expect(fake.terminated).toBe(true)
+    expect(vi.getTimerCount()).toBe(0)
   })
 })

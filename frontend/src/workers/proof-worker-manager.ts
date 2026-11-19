@@ -4,15 +4,20 @@ import type {
   WorkerMessageDispatchResult,
   WorkerOwnershipToken,
   WorkerStatus,
+  WorkerTeardownOptions,
+  WorkerTeardownResult,
 } from './proof.worker.types';
 import { ProofWorkerLogger } from './proof-worker-logger';
 import { validateCSPPolicy, isOriginAllowed, createCSPHeaders } from './csp-policy';
 
 const logger = new ProofWorkerLogger({ enabled: true });
 
+/** Default bounded wait (ms) for an explicit worker `teardown_ack` after cancellation. */
+export const DEFAULT_TEARDOWN_TIMEOUT_MS = 2000;
+
 /**
- * Coordinates browser proof worker lifecycle, CSP validation, and single-owner
- * operation generation tracking.
+ * Coordinates browser proof worker lifecycle, CSP validation, single-owner
+ * operation generation tracking, and bounded teardown acknowledgement.
  *
  * Single ownership protocol:
  * - At most one active operation may hold ownership via `acquireOwnership()`.
@@ -21,6 +26,15 @@ const logger = new ProofWorkerLogger({ enabled: true });
  * - Incoming `progress` and proof (`success`/`error`) messages are dispatched
  *   through `handleWorkerMessage()`, which fails closed and rejects any message
  *   belonging to a cancelled, replaced, or unowned generation.
+ *
+ * Explicit teardown acknowledgement protocol:
+ * - `cancelAndTeardown()` cancels the active generation, posts a `cancel`
+ *   message to the worker, and waits up to a bounded `timeoutMs` interval for
+ *   a matching `teardown_ack` response (via `handleWorkerMessage()` or
+ *   `acknowledgeTeardown()`).
+ * - If acknowledged in time, teardown resolves with `status: 'confirmed'`.
+ * - If the bounded interval expires without acknowledgement, the worker is
+ *   forcibly terminated and teardown resolves with `status: 'forced'`.
  */
 export class ProofWorkerManager {
   private worker: Worker | null = null;
@@ -29,6 +43,11 @@ export class ProofWorkerManager {
   private progressHandlers: Map<string, (response: ProofWorkerResponse) => void> = new Map();
   private operationGenerations: Map<string, number> = new Map();
   private cancelledGenerations: Set<number> = new Set();
+  private pendingTeardowns: Map<
+    string,
+    { generation: number; settle: (confirmed: boolean) => void }
+  > = new Map();
+  private lastTeardownResult: WorkerTeardownResult | null = null;
   private generation = 0;
   private activeOwner: WorkerOwnershipToken | null = null;
   private isInitialized = false;
@@ -152,6 +171,29 @@ export class ProofWorkerManager {
     }
 
     const receivedGeneration = response.generation;
+
+    if (response.type === 'teardown_ack') {
+      const cancelId = response.id;
+      const pending = cancelId ? this.pendingTeardowns.get(cancelId) : undefined;
+      if (!cancelId || !pending) {
+        return {
+          accepted: false,
+          reason: 'unowned_operation',
+          expectedGeneration: this.generation,
+          receivedGeneration,
+        };
+      }
+      if (receivedGeneration !== undefined && receivedGeneration !== pending.generation) {
+        return {
+          accepted: false,
+          reason: 'stale_generation',
+          expectedGeneration: pending.generation,
+          receivedGeneration,
+        };
+      }
+      this.acknowledgeTeardown(cancelId, receivedGeneration);
+      return { accepted: true, generation: pending.generation, operationId: cancelId };
+    }
 
     if (receivedGeneration !== undefined && this.cancelledGenerations.has(receivedGeneration)) {
       return {
@@ -324,6 +366,130 @@ export class ProofWorkerManager {
     // this.worker?.postMessage(message);
   }
 
+  /**
+   * Returns a copy of the most recent teardown result, or null if no
+   * `cancelAndTeardown()` has completed yet.
+   */
+  getLastTeardownResult(): WorkerTeardownResult | null {
+    return this.lastTeardownResult ? { ...this.lastTeardownResult } : null;
+  }
+
+  /**
+   * Records an explicit worker teardown acknowledgement for a pending
+   * `cancelAndTeardown()` request. Fails closed if `cancelId` is unknown or if
+   * `generation` does not match the pending teardown generation.
+   */
+  acknowledgeTeardown(cancelId: string, generation?: number): boolean {
+    const pending = this.pendingTeardowns.get(cancelId);
+    if (!pending) {
+      return false;
+    }
+    if (generation !== undefined && generation !== pending.generation) {
+      return false;
+    }
+    this.pendingTeardowns.delete(cancelId);
+    pending.settle(true);
+    return true;
+  }
+
+  /**
+   * Cancels the active operation, posts a `cancel` message to the worker, and
+   * waits up to a bounded interval (`timeoutMs`) for an explicit `teardown_ack`.
+   *
+   * - If acknowledged before the interval elapses, resolves with
+   *   `status: 'confirmed'` (`confirmed: true, forced: false`).
+   * - If the bounded interval elapses without acknowledgement, forcibly
+   *   terminates the worker and resolves with `status: 'forced'`
+   *   (`confirmed: false, forced: true`).
+   */
+  async cancelAndTeardown(options?: WorkerTeardownOptions): Promise<WorkerTeardownResult> {
+    if (!this.isInitialized) {
+      throw new Error('Worker manager not initialized');
+    }
+
+    const timeoutMs = options?.timeoutMs ?? DEFAULT_TEARDOWN_TIMEOUT_MS;
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      throw new Error('Invalid teardown timeoutMs: must be a positive finite number');
+    }
+
+    const cancelId = `cancel_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
+
+    if (this.activeOwner !== null) {
+      this.cancelledGenerations.add(this.activeOwner.generation);
+      this.activeOwner = null;
+      this.generation += 1;
+    } else if (this.operationGenerations.size > 0 || this.generation > 0) {
+      this.cancelledGenerations.add(this.generation);
+      this.generation += 1;
+    }
+
+    const teardownGeneration = this.generation;
+    const message: ProofWorkerMessage = {
+      type: 'cancel',
+      id: cancelId,
+      generation: teardownGeneration,
+    };
+
+    logger.info('Sending cancel message and awaiting teardown ack', {
+      id: cancelId,
+      generation: teardownGeneration,
+      timeoutMs,
+    });
+    this.worker?.postMessage(message);
+
+    const confirmed = await new Promise<boolean>((resolve) => {
+      let settled = false;
+      const settle = (wasConfirmed: boolean) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        this.pendingTeardowns.delete(cancelId);
+        resolve(wasConfirmed);
+      };
+
+      const timer = setTimeout(() => {
+        settle(false);
+      }, timeoutMs);
+
+      this.pendingTeardowns.set(cancelId, {
+        generation: teardownGeneration,
+        settle,
+      });
+    });
+
+    if (!confirmed && this.worker) {
+      this.worker.terminate();
+      this.worker = null;
+    }
+
+    const result: WorkerTeardownResult = {
+      status: confirmed ? 'confirmed' : 'forced',
+      confirmed,
+      forced: !confirmed,
+      generation: teardownGeneration,
+      cancelId,
+      timeoutMs,
+    };
+    this.lastTeardownResult = result;
+
+    if (confirmed) {
+      logger.info('Worker teardown confirmed', {
+        id: cancelId,
+        generation: teardownGeneration,
+        status: result.status,
+      });
+    } else {
+      logger.warn('Worker teardown timed out; forced termination', {
+        id: cancelId,
+        generation: teardownGeneration,
+        status: result.status,
+        timeoutMs,
+      });
+    }
+
+    return { ...result };
+  }
+
   getStatus(): WorkerStatus {
     return {
       isRunning: false, // In a real implementation, this would check the actual worker state
@@ -337,6 +503,10 @@ export class ProofWorkerManager {
   }
 
   destroy(): void {
+    for (const pending of this.pendingTeardowns.values()) {
+      pending.settle(false);
+    }
+    this.pendingTeardowns.clear();
     if (this.worker) {
       this.worker.terminate();
       this.worker = null;
