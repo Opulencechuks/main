@@ -54,6 +54,9 @@ EXPECTED_CIRCUIT_VERSION: Final[int] = 2
 MIN_PROOF_BYTES: Final[int] = 64
 MAX_PROOF_BYTES: Final[int] = 65_536
 
+MIN_AGGREGATION_SIZE: Final[int] = 1
+MAX_AGGREGATION_SIZE: Final[int] = 8
+
 #: Hard ceiling on accepted hex input length. Anything longer is rejected on the
 #: string itself, before any decoding, so a hostile caller cannot force a large
 #: allocation just to be told the value is too big.
@@ -92,9 +95,9 @@ SCHEMA_SILENT_WITNESS_V2: Final[str] = "silent_witness/v2"
 
 #: Protocol Merkle-depth bound for ``revocation_witness/v1`` (#357).
 #: Must match the Noir globals and the Soroban registry constants.
-MAX_REVOCATION_WITNESS_DEPTH: Final[int] = 3
+MAX_REVOCATION_WITNESS_DEPTH: Final[int] = 16
 #: Leaf capacity implied by ``MAX_REVOCATION_WITNESS_DEPTH`` (``2**depth``).
-MAX_REVOCATION_LEAVES: Final[int] = 8
+MAX_REVOCATION_LEAVES: Final[int] = 65_536
 
 _ZERO_FIELD: Final[bytes] = b"\x00" * FIELD_LEN
 
