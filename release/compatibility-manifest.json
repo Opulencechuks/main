@@ -83,17 +83,17 @@
     {
       "component": "circuit",
       "path": "zk/noir/silent_witness/Nargo.toml",
-      "sha256": "6c7e229512105da836add0a78c41396f5b243e7a1f7cdb2cf96f2a76d63fbd28"
+      "sha256": "10a5d3ecf6efb8ef39317231452986eddc17b97ce0bcba0031b3198c6478f763"
     },
     {
       "component": "circuit",
       "path": "zk/noir/silent_witness/src/main.nr",
-      "sha256": "a418b2f1eea19a54901b019afb6a42fa96e1616ba608e4ede587a32c1b2c918c"
+      "sha256": "e606a165bfa683da556cedfc32c3a4cc46baa051b50301934e2107a01cd3572c"
     },
     {
       "component": "verifier",
       "path": "release/verifier-binding.json",
-      "sha256": "e2a5d920e1ffa1ffa001acd4ccd3e3ef3a6a577452cc29b3f6b3c5897f922890"
+      "sha256": "a97a983ff63ccc08ec048e5217bdeb282607aa6e862e92b3f3594d37e30f128b"
     },
     {
       "component": "registry",
@@ -103,7 +103,7 @@
     {
       "component": "registry",
       "path": "contracts/contracts/harpocrates-registry/Cargo.toml",
-      "sha256": "3b1d0f439836b589b8c7a6eed01a7df478301836c2e754bffb00e8efc52fe189"
+      "sha256": "ae94654ea843d7a7580156b2dfe5e83c091e75eb7af8d46a7d32f94b105a1183"
     }
   ]
 }
