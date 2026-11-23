@@ -9,8 +9,33 @@ import type {
 } from './proof.worker.types';
 import { ProofWorkerLogger } from './proof-worker-logger';
 import { validateCSPPolicy, isOriginAllowed, createCSPHeaders } from './csp-policy';
+import {
+  PROOF_MEMORY_ACCOUNTING_LIMITS,
+  PROOF_MEMORY_BUFFER_CLASSES,
+  ProofOperationMemoryAccountant,
+  byteLengthOfProofWorkerValue,
+  createProofOperationMemoryAccountant,
+  type ProofBufferClassCounter,
+  type ProofMemoryBufferClass,
+  type ProofOperationMemoryReport,
+  type ProofOperationMemoryStatus,
+} from '../proofWorkerMemory';
+
+export {
+  PROOF_WORKER_PROTOCOL_VERSION,
+  PROOF_MEMORY_ACCOUNTING_LIMITS,
+  PROOF_MEMORY_BUFFER_CLASSES,
+};
+export type {
+  WorkerProtocolVersionCheckResult,
+  ProofBufferClassCounter,
+  ProofMemoryBufferClass,
+  ProofOperationMemoryReport,
+  ProofOperationMemoryStatus,
+};
 
 const logger = new ProofWorkerLogger({ enabled: true });
+const textEncoder = new TextEncoder();
 
 /** Default bounded wait (ms) for an explicit worker `teardown_ack` after cancellation. */
 export const DEFAULT_TEARDOWN_TIMEOUT_MS = 2000;
@@ -37,6 +62,9 @@ export const DEFAULT_TEARDOWN_TIMEOUT_MS = 2000;
  *   forcibly terminated and teardown resolves with `status: 'forced'`.
  */
 export class ProofWorkerManager {
+  // Preserve the currently active proof result to avoid losing state on unexpected messages
+  private activeProofResult: ProofWorkerResponse | null = null;
+
   private worker: Worker | null = null;
   private cspConfig: ReturnType<typeof validateCSPPolicy>;
   private messageHandlers: Map<string, (response: ProofWorkerResponse) => void> = new Map();
@@ -51,12 +79,37 @@ export class ProofWorkerManager {
   private generation = 0;
   private activeOwner: WorkerOwnershipToken | null = null;
   private isInitialized = false;
+  private readonly protocolVersion = PROOF_WORKER_PROTOCOL_VERSION;
 
   constructor(config?: Partial<ReturnType<typeof validateCSPPolicy>>) {
     this.cspConfig = validateCSPPolicy(config || {});
   }
 
+  private trackOperationMemory(
+    operationId: string,
+    accountant: ProofOperationMemoryAccountant
+  ): void {
+    if (this.operationMemory.size >= PROOF_MEMORY_ACCOUNTING_LIMITS.maxTrackedOperations) {
+      let evictKey: string | undefined;
+      for (const [key, entry] of this.operationMemory.entries()) {
+        if (entry.snapshot().status !== 'active') {
+          evictKey = key;
+          break;
+        }
+      }
+      if (evictKey === undefined) {
+        evictKey = this.operationMemory.keys().next().value;
+      }
+      if (evictKey !== undefined) {
+        this.operationMemory.delete(evictKey);
+      }
+    }
+    this.operationMemory.set(operationId, accountant);
+  }
+
   async init(origin?: string): Promise<void> {
+
+  }
     if (this.isInitialized) {
       logger.warn('Worker already initialized');
       return;
@@ -67,8 +120,6 @@ export class ProofWorkerManager {
     }
 
     try {
-      // In a real implementation, this would load the worker from a URL
-      // For now, we simulate the initialization
       this.isInitialized = true;
       logger.info('Worker manager initialized', { cspConfig: this.cspConfig });
     } catch (error) {
@@ -322,6 +373,7 @@ export class ProofWorkerManager {
       });
 
       const message: ProofWorkerMessage = {
+        protocolVersion: this.protocolVersion,
         type: 'verify',
         payload: {
           evidence,
@@ -334,9 +386,18 @@ export class ProofWorkerManager {
       };
 
       logger.info('Sending verify message', { id: messageId });
-      // In a real implementation, this would post to the actual worker
-      // this.worker?.postMessage(message);
+      this.worker?.postMessage(message);
     });
+  }
+
+  /** Registers a transient buffer so it is wiped when the session completes or is reused. */
+  trackBuffer<T extends ArrayBuffer | ArrayBufferView>(buffer: T): T {
+    return this.bufferLedger.track(buffer);
+  }
+
+  /** Releases a buffer once it has been transferred or exported. */
+  releaseBuffer(buffer: ArrayBuffer | ArrayBufferView): void {
+    this.bufferLedger.release(buffer);
   }
 
   async cancelProof(): Promise<void> {
@@ -356,14 +417,130 @@ export class ProofWorkerManager {
     }
 
     const message: ProofWorkerMessage = {
+      protocolVersion: this.protocolVersion,
       type: 'cancel',
       id: messageId,
       generation: this.generation,
     };
 
     logger.info('Sending cancel message', { id: messageId });
-    // In a real implementation, this would post to the actual worker
-    // this.worker?.postMessage(message);
+    this.worker?.postMessage(message);
+  }
+
+  getProtocolVersion(): number {
+    return this.protocolVersion;
+  }
+
+  /**
+   * Validate an incoming worker message's protocol version before accepting any
+   * transferred buffers or parsing payload fields. Returns a clear reload-required
+   * error response on mismatch and settles any matching pending request.
+   */
+  handleWorkerMessage(
+    rawMessage: unknown,
+    acceptBuffers?: () => readonly ArrayBuffer[]
+  ): ProofWorkerResponse {
+    const candidate = isRecord(rawMessage) ? rawMessage : null;
+    const id = candidate && typeof candidate.id === 'string' ? candidate.id : undefined;
+    const check = validateWorkerProtocolVersion(
+      candidate ? candidate.protocolVersion : undefined,
+      this.protocolVersion
+    );
+
+    if (!check.compatible) {
+      logger.warn('Rejected incompatible worker protocol version', {
+        expectedVersion: check.expectedVersion,
+        receivedVersion: check.receivedVersion,
+        reloadRequired: true,
+      });
+      const mismatchResponse = createProtocolMismatchResponse(check, id);
+      if (id !== undefined) {
+        const handler = this.messageHandlers.get(id);
+        handler?.(mismatchResponse);
+      }
+      return mismatchResponse;
+    }
+
+    // Protocol version verified: safe to accept transferred buffers and dispatch.
+    acceptBuffers?.();
+    const response = candidate as unknown as ProofWorkerResponse;
+    if (id !== undefined) {
+      const handler = this.messageHandlers.get(id);
+      handler?.(response);
+    }
+    return response;
+  }
+
+  getProtocolVersion(): number {
+    return this.protocolVersion;
+  }
+
+  /**
+   * Validate an incoming worker message's protocol version before accepting any
+   * transferred buffers or parsing payload fields. Returns a clear reload-required
+   * error response on mismatch and settles any matching pending request.
+   */
+  handleWorkerMessage(
+    rawMessage: unknown,
+    acceptBuffers?: () => readonly ArrayBuffer[]
+  ): ProofWorkerResponse {
+    const candidate = isRecord(rawMessage) ? rawMessage : null;
+    const id = candidate && typeof candidate.id === 'string' ? candidate.id : undefined;
+    const check = validateWorkerProtocolVersion(
+      candidate ? candidate.protocolVersion : undefined,
+      this.protocolVersion
+    );
+
+    if (!check.compatible) {
+      logger.warn('Rejected incompatible worker protocol version', {
+        expectedVersion: check.expectedVersion,
+        receivedVersion: check.receivedVersion,
+        reloadRequired: true,
+      });
+      const mismatchResponse = createProtocolMismatchResponse(check, id);
+      if (id !== undefined) {
+        const handler = this.messageHandlers.get(id);
+        handler?.(mismatchResponse);
+      }
+      return mismatchResponse;
+    }
+
+    // Protocol version verified: safe to accept transferred buffers and dispatch.
+    const acceptedBuffers = acceptBuffers?.() ?? [];
+    if (id !== undefined && acceptedBuffers.length > 0) {
+      const accountant = this.operationMemory.get(id);
+      if (accountant) {
+        const transferredBytes = acceptedBuffers.reduce(
+          (total, buffer) => total + buffer.byteLength,
+          0
+        );
+        accountant.allocate('proof', transferredBytes);
+      }
+    }
+    const response = candidate as unknown as ProofWorkerResponse;
+    if (id !== undefined) {
+      const handler = this.messageHandlers.get(id);
+      handler?.(response);
+    }
+    return response;
+  }
+
+  /**
+   * Returns a frozen, privacy-safe per-operation buffer accounting snapshot.
+   * Counters reflect tracked operation buffer classes only and do not claim
+   * browser-wide heap or OS-level memory precision.
+   */
+  getOperationMemoryReport(operationId: string): ProofOperationMemoryReport | undefined {
+    return this.operationMemory.get(operationId)?.snapshot();
+  }
+
+  /**
+   * Returns a bounded snapshot of tracked per-operation memory reports.
+   */
+  getMemoryAccountingSnapshot(): readonly ProofOperationMemoryReport[] {
+    return Object.freeze(
+      Array.from(this.operationMemory.values(), (accountant) => accountant.snapshot())
+    );
   }
 
   /**
@@ -492,14 +669,58 @@ export class ProofWorkerManager {
 
   getStatus(): WorkerStatus {
     return {
-      isRunning: false, // In a real implementation, this would check the actual worker state
+      isRunning: false,
       currentTaskId: undefined,
       memoryUsage: undefined,
     };
   }
 
+  getResourceAdmissionDecision(
+    options: Partial<ProofWorkerResourceAdmissionInput> = {}
+  ): ProofWorkerResourceAdmissionDecision {
+    const nav =
+      typeof navigator !== 'undefined'
+        ? (navigator as Navigator & { deviceMemory?: number })
+        : undefined;
+    const crossOriginIsolated =
+      options.crossOriginIsolated ??
+      (typeof globalThis.crossOriginIsolated === 'boolean'
+        ? globalThis.crossOriginIsolated
+        : false);
+    const hardwareConcurrency =
+      options.hardwareConcurrency !== undefined
+        ? options.hardwareConcurrency
+        : nav?.hardwareConcurrency ?? 1;
+    const deviceMemoryGB =
+      options.deviceMemoryGB !== undefined
+        ? options.deviceMemoryGB
+        : typeof nav?.deviceMemory === 'number'
+          ? nav.deviceMemory
+          : null;
+
+    return evaluateProofWorkerResourceAdmission({
+      usage: options.usage,
+      maxMemoryMB: options.maxMemoryMB ?? this.cspConfig.maxMemoryMB,
+      deviceMemoryGB,
+      crossOriginIsolated,
+      hardwareConcurrency,
+      activeTasks: options.activeTasks ?? this.messageHandlers.size,
+      maxConcurrentTasks: options.maxConcurrentTasks ?? 1,
+    });
+  }
+
   getCSPHeaders(): Record<string, string> {
     return createCSPHeaders(this.cspConfig);
+  }
+
+  forwardDiagnosticToTelemetry(
+    diagnostic: ProofWorkerDiagnosticInput,
+    options?: { maxBytes?: number; emit?: typeof emitScrubbedTelemetry },
+  ): BoundedProofWorkerDiagnostic {
+    const bounded = boundProofWorkerDiagnostic(diagnostic, { maxBytes: options?.maxBytes });
+    const sink = options?.emit ?? emitScrubbedTelemetry;
+    sink(bounded.level, 'proof_worker.diagnostic', { ...bounded });
+    return bounded;
   }
 
   destroy(): void {

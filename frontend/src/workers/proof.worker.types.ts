@@ -43,6 +43,7 @@ export interface WorkerTeardownResult {
 }
 
 export interface ProofWorkerMessage {
+  protocolVersion?: number;
   type: 'init' | 'verify' | 'cancel' | 'status';
   payload?: {
     evidence?: string;
@@ -70,6 +71,7 @@ export interface ProofWorkerResponse {
     code: string;
     message: string;
     privacySafe: boolean;
+    reloadRequired?: boolean;
   };
 }
 
@@ -79,6 +81,13 @@ export interface CSPPolicyConfig {
   allowedOrigins: string[];
   sandbox: boolean;
 }
+
+export type {
+  ProofWorkerAdmissionReasonCode,
+  ProofWorkerExecutionMode,
+  ProofWorkerResourceAdmissionDecision,
+  ProofWorkerResourceAdmissionInput,
+} from '../proofWorkerMemory';
 
 export interface WorkerStatus {
   isRunning: boolean;
